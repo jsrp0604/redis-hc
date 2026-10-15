@@ -1466,6 +1466,7 @@ void initServerConfig(void) {
     server.maxclients = REDIS_MAX_CLIENTS;
     server.bpop_blocked_clients = 0;
     server.maxmemory = REDIS_DEFAULT_MAXMEMORY;
+    server.maxobjects = REDIS_DEFAULT_MAXOBJECTS;
     server.maxmemory_policy = REDIS_DEFAULT_MAXMEMORY_POLICY;
     server.maxmemory_samples = REDIS_DEFAULT_MAXMEMORY_SAMPLES;
     server.hash_max_ziplist_entries = REDIS_HASH_MAX_ZIPLIST_ENTRIES;
@@ -2206,7 +2207,7 @@ int processCommand(redisClient *c) {
      * First we try to free some memory if possible (if there are volatile
      * keys in the dataset). If there are not the only thing we can do
      * is returning an error. */
-    if (server.maxmemory) {
+    if (server.maxmemory || server.maxobjects) {
         int retval = freeMemoryIfNeeded();
         if ((c->cmd->flags & REDIS_CMD_DENYOOM) && retval == REDIS_ERR) {
             flagTransaction(c);
@@ -3244,42 +3245,63 @@ void evictionPoolRefreshIdleness(void) {
 
 int freeMemoryIfNeeded(void) {
     size_t mem_used, mem_tofree, mem_freed;
+    size_t dbsize, objs_tofree, objs_freed;
     int slaves = listLength(server.slaves);
     mstime_t latency, eviction_latency;
+    int jj;
 
-    /* Remove the size of slaves output buffers and AOF buffer from the
-     * count of used memory. */
-    mem_used = zmalloc_used_memory();
-    if (slaves) {
-        listIter li;
-        listNode *ln;
+    mem_tofree = 0;
+    mem_freed = 0;
+    objs_tofree = 0;
+    objs_freed = 0;
 
-        listRewind(server.slaves,&li);
-        while((ln = listNext(&li))) {
-            redisClient *slave = listNodeValue(ln);
-            unsigned long obuf_bytes = getClientOutputBufferMemoryUsage(slave);
-            if (obuf_bytes > mem_used)
-                mem_used = 0;
-            else
-                mem_used -= obuf_bytes;
+    if (server.maxmemory) {
+        mem_used = zmalloc_used_memory();
+        if (slaves) {
+            listIter li;
+            listNode *ln;
+
+            listRewind(server.slaves,&li);
+            while((ln = listNext(&li))) {
+                redisClient *slave = listNodeValue(ln);
+                unsigned long obuf_bytes = getClientOutputBufferMemoryUsage(slave);
+                if (obuf_bytes > mem_used)
+                    mem_used = 0;
+                else
+                    mem_used -= obuf_bytes;
+            }
+        }
+        if (server.aof_state != REDIS_AOF_OFF) {
+            mem_used -= sdslen(server.aof_buf);
+            mem_used -= aofRewriteBufferSize();
+        }
+
+        if (mem_used > server.maxmemory) {
+            if (server.maxmemory_policy == REDIS_MAXMEMORY_NO_EVICTION)
+                return REDIS_ERR;
+
+            mem_tofree = mem_used - server.maxmemory;
         }
     }
-    if (server.aof_state != REDIS_AOF_OFF) {
-        mem_used -= sdslen(server.aof_buf);
-        mem_used -= aofRewriteBufferSize();
+
+    /* Object-count limit (same logic as the HC fork). */
+    if (server.maxobjects) {
+        dbsize = 0;
+        for (jj = 0; jj < server.dbnum; jj++)
+            dbsize += dictSize((server.db+jj)->dict);
+
+        if (dbsize > server.maxobjects) {
+            if (server.maxmemory_policy == REDIS_MAXMEMORY_NO_EVICTION)
+                return REDIS_ERR; 
+
+            objs_tofree = dbsize - server.maxobjects;
+        }
     }
 
-    /* Check if we are over the memory limit. */
-    if (mem_used <= server.maxmemory) return REDIS_OK;
+    if (objs_tofree == 0 && mem_tofree == 0) return REDIS_OK;
 
-    if (server.maxmemory_policy == REDIS_MAXMEMORY_NO_EVICTION)
-        return REDIS_ERR; /* We need to free memory, but policy forbids. */
-
-    /* Compute how much memory we need to free. */
-    mem_tofree = mem_used - server.maxmemory;
-    mem_freed = 0;
     latencyStartMonitor(latency);
-    while (mem_freed < mem_tofree) {
+    while ((mem_freed < mem_tofree) || (objs_freed < objs_tofree)) {
         int j, k, keys_freed = 0;
 
         for (j = 0; j < server.dbnum; j++) {
@@ -3383,6 +3405,7 @@ int freeMemoryIfNeeded(void) {
                 latencyRemoveNestedEvent(latency,eviction_latency);
                 delta -= (long long) zmalloc_used_memory();
                 mem_freed += delta;
+                objs_freed++;
                 server.stat_evictedkeys++;
                 notifyKeyspaceEvent(REDIS_NOTIFY_EVICTED, "evicted",
                     keyobj, db->id);

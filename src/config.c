@@ -226,6 +226,8 @@ void loadServerConfigFromString(char *config) {
             }
         } else if (!strcasecmp(argv[0],"maxmemory") && argc == 2) {
             server.maxmemory = memtoll(argv[1],NULL);
+        } else if (!strcasecmp(argv[0],"maxobjects") && argc == 2) {
+            server.maxobjects = memtoll(argv[1],NULL);
         } else if (!strcasecmp(argv[0],"maxmemory-policy") && argc == 2) {
             if (!strcasecmp(argv[1],"volatile-lru")) {
                 server.maxmemory_policy = REDIS_MAXMEMORY_VOLATILE_LRU;
@@ -638,6 +640,17 @@ void configSetCommand(redisClient *c) {
             }
             freeMemoryIfNeeded();
         }
+    } else if (!strcasecmp(c->argv[2]->ptr,"maxobjects")) {
+        ll = memtoll(o->ptr,&err);
+        if (err || ll < 0) goto badfmt;
+        server.maxobjects = ll;
+        if (server.maxobjects) {
+            if (server.maxmemory) {
+                redisLog(REDIS_WARNING,"WARNING: setting maxobjects will unset maxmemory setting");
+                server.maxmemory = 0;
+            }
+            freeMemoryIfNeeded();
+        }
     } else if (!strcasecmp(c->argv[2]->ptr,"maxclients")) {
         int orig_value = server.maxclients;
 
@@ -1028,6 +1041,7 @@ void configGetCommand(redisClient *c) {
 
     /* Numerical values */
     config_get_numerical_field("maxmemory",server.maxmemory);
+    config_get_numerical_field("maxobjects",server.maxobjects);
     config_get_numerical_field("maxmemory-samples",server.maxmemory_samples);
     config_get_numerical_field("timeout",server.maxidletime);
     config_get_numerical_field("tcp-keepalive",server.tcpkeepalive);

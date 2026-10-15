@@ -116,6 +116,7 @@ typedef long long mstime_t; /* millisecond time type. */
 #define REDIS_DEFAULT_SLAVE_READ_ONLY 1
 #define REDIS_DEFAULT_REPL_DISABLE_TCP_NODELAY 0
 #define REDIS_DEFAULT_MAXMEMORY 0
+#define REDIS_DEFAULT_MAXOBJECTS 0
 #define REDIS_DEFAULT_MAXMEMORY_SAMPLES 5
 #define REDIS_DEFAULT_AOF_FILENAME "appendonly.aof"
 #define REDIS_DEFAULT_AOF_NO_FSYNC_ON_REWRITE 0
@@ -453,8 +454,11 @@ typedef struct redisObject {
  * Entries inside the eviciton pool are taken ordered by idle time, putting
  * greater idle times to the right (ascending order).
  *
- * Empty entries have the key pointer set to NULL. */
+ * Empty entries have the key pointer set to NULL. 
+ * Pool size can be overridden at build time, e.g. -DREDIS_EVICTION_POOL_SIZE=4 */
+#ifndef REDIS_EVICTION_POOL_SIZE
 #define REDIS_EVICTION_POOL_SIZE 16
+#endif
 struct evictionPoolEntry {
     unsigned long long idle;    /* Object idle time. */
     sds key;                    /* Key name. */
@@ -861,6 +865,7 @@ struct redisServer {
     /* Limits */
     unsigned int maxclients;            /* Max number of simultaneous clients */
     unsigned long long maxmemory;   /* Max number of memory bytes to use */
+    unsigned long long maxobjects;  /* Max number of keys (0 = no limit) */
     int maxmemory_policy;           /* Policy for key eviction */
     int maxmemory_samples;          /* Pricision of random sampling */
     /* Blocked clients */
