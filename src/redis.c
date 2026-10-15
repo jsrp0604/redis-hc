@@ -1153,6 +1153,13 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     /* Handle background operations on Redis databases. */
     databasesCron();
 
+#ifdef LFU_PRIORITY
+    /* Refreshes the cached scores of the eviction pool. */
+    run_with_period(1000) {
+        evictionPoolRefreshIdleness();
+    }
+#endif
+
     /* Start a scheduled AOF rewrite if this was requested by the user while
      * a BGSAVE was in progress. */
     if (server.rdb_child_pid == -1 && server.aof_child_pid == -1 &&
@@ -3154,7 +3161,7 @@ void evictionPoolPopulate(dict *sampledict, dict *keydict, struct evictionPoolEn
          * again in the key dictionary to obtain the value object. */
         if (sampledict != keydict) de = dictFind(keydict, key);
         o = dictGetVal(de);
-        idle = estimateObjectIdleTime(o);
+        idle = EVPOOL_SCORE(o);
 
         /* Insert the element inside the pool.
          * First, find the first empty bucket or the first populated
@@ -3191,6 +3198,49 @@ void evictionPoolPopulate(dict *sampledict, dict *keydict, struct evictionPoolEn
     }
     if (samples != _samples) zfree(samples);
 }
+
+#ifdef LFU_PRIORITY
+void evictionPoolRefreshIdleness(void) {
+    int j, k, i;
+
+    if (server.maxmemory_policy != REDIS_MAXMEMORY_ALLKEYS_LRU &&
+        server.maxmemory_policy != REDIS_MAXMEMORY_VOLATILE_LRU) return;
+
+    for (j = 0; j < server.dbnum; j++) {
+        redisDb *db = server.db+j;
+        struct evictionPoolEntry *pool = db->eviction_pool;
+        if (pool == NULL) continue;
+
+        for (k = 0; k < REDIS_EVICTION_POOL_SIZE; k++) {
+            dictEntry *de;
+            if (pool[k].key == NULL) continue;
+            de = dictFind(db->dict, pool[k].key);
+            if (de) {
+                pool[k].idle = EVPOOL_SCORE((robj*)dictGetVal(de));
+                continue;
+            }
+            /* Ghost entries get dropped. */
+            sdsfree(pool[k].key);
+            pool[k].key = NULL;
+            pool[k].idle = 0;
+        }
+
+        /* Re-sort the pool with insertion sort. */
+        for (i = 1; i < REDIS_EVICTION_POOL_SIZE; i++) {
+            struct evictionPoolEntry tmp;
+            int s;
+            if (pool[i].key == NULL) continue;
+            tmp = pool[i];
+            s = i - 1;
+            while (s >= 0 && (pool[s].key == NULL || pool[s].idle > tmp.idle)) {
+                pool[s+1] = pool[s];
+                s--;
+            }
+            pool[s+1] = tmp;
+        }
+    }
+}
+#endif /* LFU_PRIORITY */
 
 int freeMemoryIfNeeded(void) {
     size_t mem_used, mem_tofree, mem_freed;

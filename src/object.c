@@ -44,7 +44,7 @@ robj *createObject(int type, void *ptr) {
     o->refcount = 1;
 
     /* Set the LRU to the current lruclock (minutes resolution). */
-    o->lru = LRU_CLOCK();
+    o->lru = OBJ_LRU_INIT();
     return o;
 }
 
@@ -65,7 +65,7 @@ robj *createEmbeddedStringObject(char *ptr, size_t len) {
     o->encoding = REDIS_ENCODING_EMBSTR;
     o->ptr = sh+1;
     o->refcount = 1;
-    o->lru = LRU_CLOCK();
+    o->lru = OBJ_LRU_INIT();
 
     sh->len = len;
     sh->free = 0;
@@ -698,6 +698,71 @@ unsigned long long estimateObjectIdleTime(robj *o) {
                     REDIS_LRU_CLOCK_RESOLUTION;
     }
 }
+
+#ifdef LFU_PRIORITY
+/* ---------------------------------------------------------------------------
+ * LFU priority (build with -DLFU_PRIORITY).
+ *
+ * This is the LFU policy, but the value used to rank keys is a hyperbolic-
+ * caching-inspired PRIORITY (estimated hits / minutes in cache) instead of the
+ * raw frequency counter. Redis 3.0 has no allkeys-lfu policy, so the build
+ * flag makes the existing allkeys-lru policy rank its sampled keys this way.
+ *
+ * The 24-bit o->lru is split as in Valkey:
+ *
+ *        16 bits                8 bits
+ *   +-------------------+----------------+
+ *   | insertion minute  | log counter    |
+ *   +-------------------+----------------+
+ *
+ * The minute half is written once, at creation, and never updated on access.
+ * ------------------------------------------------------------------------- */
+#define LFU_PRIORITY_INIT_VAL    5    
+#define LFU_PRIORITY_LOG_FACTOR  10   
+
+static uint16_t lfuPriorityMinutes(void) {
+    return (uint16_t)(server.mstime / 60000);
+}
+
+unsigned lfuPriorityInit(void) {
+    return ((uint32_t)lfuPriorityMinutes() << 8) | LFU_PRIORITY_INIT_VAL;
+}
+
+static uint8_t lfuPriorityLogIncr(uint8_t freq) {
+    if (freq == 255) return freq;
+    double r = (double)rand() / RAND_MAX;
+    double baseval = (int)freq - LFU_PRIORITY_INIT_VAL;
+    if (baseval < 0) baseval = 0;
+    double p = 1.0 / (baseval * LFU_PRIORITY_LOG_FACTOR + 1);
+    if (r < p) freq++;
+    return freq;
+}
+
+unsigned lfuPriorityTouch(unsigned lru) {
+    uint8_t freq = (uint8_t)lru;
+    freq = lfuPriorityLogIncr(freq);
+    return (lru & ~(uint32_t)UINT8_MAX) | freq;
+}
+
+unsigned lfuPriorityIdleness(robj *o) {
+    uint32_t lrulfu = o->lru;
+    uint8_t freq = (uint8_t)lrulfu;
+    uint16_t prev_time = (uint16_t)(lrulfu >> 8);
+    uint16_t elapsed = lfuPriorityMinutes() - prev_time;
+    uint32_t idleness;
+
+    if (freq == 0) {
+        idleness = UINT32_MAX;
+    } else {
+        uint32_t t = elapsed ? elapsed : 1;
+        uint8_t safe_freq = (freq > 24) ? 24 : freq;
+        uint32_t n_est = (1u << safe_freq) - 1;
+        uint32_t p = (n_est << 8) / (t * 1000);
+        idleness = ((uint32_t)UINT8_MAX << 8) - p;
+    }
+    return idleness;
+}
+#endif 
 
 /* This is a helper function for the OBJECT command. We need to lookup keys
  * without any modification of LRU or other parameters. */

@@ -50,7 +50,7 @@ robj *lookupKey(redisDb *db, robj *key) {
          * Don't do it if we have a saving child, as this will trigger
          * a copy on write madness. */
         if (server.rdb_child_pid == -1 && server.aof_child_pid == -1)
-            val->lru = LRU_CLOCK();
+            OBJ_LRU_TOUCH(val);
         return val;
     } else {
         return NULL;
@@ -108,6 +108,9 @@ void dbOverwrite(redisDb *db, robj *key, robj *val) {
     dictEntry *de = dictFind(db->dict,key->ptr);
 
     redisAssertWithInfo(NULL,key,de != NULL);
+#ifdef LFU_PRIORITY
+    val->lru = ((robj*)dictGetVal(de))->lru;
+#endif
     dictReplace(db->dict, key->ptr, val);
 }
 

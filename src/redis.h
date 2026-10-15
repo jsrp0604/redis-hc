@@ -1160,6 +1160,23 @@ int compareStringObjects(robj *a, robj *b);
 int collateStringObjects(robj *a, robj *b);
 int equalStringObjects(robj *a, robj *b);
 unsigned long long estimateObjectIdleTime(robj *o);
+
+/* Hooks used by createObject / lookupKey / evictionPoolPopulate. 
+ * Without -DLFU_PRIORITY they expand to the original stock Redis 3.0 behaviour. */
+#ifdef LFU_PRIORITY
+unsigned lfuPriorityInit(void);
+unsigned lfuPriorityTouch(unsigned lru);
+unsigned lfuPriorityIdleness(robj *o);
+void evictionPoolRefreshIdleness(void);
+#define OBJ_LRU_INIT() lfuPriorityInit()
+#define OBJ_LRU_TOUCH(o) ((o)->lru = lfuPriorityTouch((o)->lru))
+#define EVPOOL_SCORE(o) lfuPriorityIdleness(o)
+#else
+#define OBJ_LRU_INIT() LRU_CLOCK()
+#define OBJ_LRU_TOUCH(o) ((o)->lru = LRU_CLOCK())
+#define EVPOOL_SCORE(o) estimateObjectIdleTime(o)
+#endif
+
 #define sdsEncodedObject(objptr) (objptr->encoding == REDIS_ENCODING_RAW || objptr->encoding == REDIS_ENCODING_EMBSTR)
 
 /* Synchronous I/O with timeout */
