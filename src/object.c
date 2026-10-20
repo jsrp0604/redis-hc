@@ -756,8 +756,9 @@ unsigned lfuPriorityIdleness(robj *o) {
     } else {
         uint32_t t = elapsed ? elapsed : 1;
         uint8_t safe_freq = (freq > 24) ? 24 : freq;
-        uint32_t n_est = (1u << safe_freq) - 1;
         uint32_t p = (n_est << 8) / (t * 1000);
+        /* Fix of substraction wrap bug that evicted hot and new keys */
+        if (p > ((uint32_t)UINT8_MAX << 8)) p = (uint32_t)UINT8_MAX << 8;   
         idleness = ((uint32_t)UINT8_MAX << 8) - p;
     }
     return idleness;
